@@ -20,8 +20,10 @@
  files located at the root of the source distribution.
  These files may also be found in the public source
  code repository located at:
-        http://github.com/signal11/hidapi .
+        https://github.com/libusb/hidapi .
 ********************************************************/
+
+#define _GNU_SOURCE /* needed for wcsdup() before glibc 2.10 */
 
 /* C */
 #include <stdio.h>
@@ -180,7 +182,7 @@ static int return_data(hid_device *dev, unsigned char *data, size_t length);
 
 static hid_device *new_hid_device(void)
 {
-	hid_device *dev = calloc(1, sizeof(hid_device));
+	hid_device *dev = (hid_device*) calloc(1, sizeof(hid_device));
 	dev->blocking = 1;
 
 	pthread_mutex_init(&dev->mutex, NULL);
@@ -202,8 +204,8 @@ static void free_hid_device(hid_device *dev)
 }
 
 #if 0
-/*TODO: Implement this funciton on hidapi/libusb.. */
-static void register_error(hid_device *device, const char *op)
+/*TODO: Implement this function on hidapi/libusb.. */
+static void register_error(hid_device *dev, const char *op)
 {
 
 }
@@ -395,11 +397,7 @@ static wchar_t *get_usb_string(libusb_device_handle *dev, uint8_t idx)
 	size_t inbytes;
 	size_t outbytes;
 	size_t res;
-#ifdef __FreeBSD__
-	const char *inptr;
-#else
 	char *inptr;
-#endif
 	char *outptr;
 #endif
 
@@ -428,7 +426,7 @@ static wchar_t *get_usb_string(libusb_device_handle *dev, uint8_t idx)
 
 	   Skip over the first character (2-bytes).  */
 	len -= 2;
-	str = malloc((len / 2 + 1) * sizeof(wchar_t));
+	str = (wchar_t*) malloc((len / 2 + 1) * sizeof(wchar_t));
 	int i;
 	for (i = 0; i < len / 2; i++) {
 		str[i] = buf[i * 2 + 2] | (buf[i * 2 + 3] << 8);
@@ -561,7 +559,7 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 							struct hid_device_info *tmp;
 
 							/* VID/PID match. Create the record. */
-							tmp = calloc(1, sizeof(struct hid_device_info));
+							tmp = (struct hid_device_info*) calloc(1, sizeof(struct hid_device_info));
 							if (cur_dev) {
 								cur_dev->next = tmp;
 							}
@@ -734,8 +732,8 @@ static void read_callback(struct libusb_transfer *transfer)
 
 	if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
 
-		struct input_report *rpt = malloc(sizeof(*rpt));
-		rpt->data = malloc(transfer->actual_length);
+		struct input_report *rpt = (struct input_report*) malloc(sizeof(*rpt));
+		rpt->data = (uint8_t*) malloc(transfer->actual_length);
 		memcpy(rpt->data, transfer->buffer, transfer->actual_length);
 		rpt->len = transfer->actual_length;
 		rpt->next = NULL;
@@ -797,11 +795,11 @@ static void read_callback(struct libusb_transfer *transfer)
 static void *read_thread(void *param)
 {
 	hid_device *dev = param;
-	unsigned char *buf;
+	uint8_t *buf;
 	const size_t length = dev->input_ep_max_packet_size;
 
 	/* Set up the transfer object. */
-	buf = malloc(length);
+	buf = (uint8_t*) malloc(length);
 	dev->transfer = libusb_alloc_transfer(0);
 	libusb_fill_interrupt_transfer(dev->transfer,
 		dev->device_handle,
@@ -1296,7 +1294,7 @@ int HID_API_EXPORT_CALL hid_get_indexed_string(hid_device *dev, int string_index
 
 HID_API_EXPORT const wchar_t * HID_API_CALL  hid_error(hid_device *dev)
 {
-	return NULL;
+	return L"hid_error is not implemented yet";
 }
 
 
@@ -1350,7 +1348,7 @@ static struct lang_map_entry lang_map[] = {
 	LANG("English - Ireland", "en_ie", 0x1809),
 	LANG("English - Jamaica", "en_jm", 0x2009),
 	LANG("English - New Zealand", "en_nz", 0x1409),
-	LANG("English - Phillippines", "en_ph", 0x3409),
+	LANG("English - Philippines", "en_ph", 0x3409),
 	LANG("English - Southern Africa", "en_za", 0x1C09),
 	LANG("English - Trinidad", "en_tt", 0x2C09),
 	LANG("English - Great Britain", "en_gb", 0x0809),

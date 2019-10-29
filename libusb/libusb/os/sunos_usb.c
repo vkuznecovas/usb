@@ -21,7 +21,6 @@
 
 #include <sys/time.h>
 #include <sys/types.h>
-#include <sys/list.h>
 #include <sys/stat.h>
 #include <strings.h>
 #include <errno.h>
@@ -46,11 +45,13 @@
 #define UPDATEDRV_PATH	"/usr/sbin/update_drv"
 #define UPDATEDRV	"update_drv"
 
-typedef list_t string_list_t;
-typedef struct string_node {
-	char		*string;
-	list_node_t	link;
-} string_node_t;
+#define	DEFAULT_LISTSIZE	6
+
+typedef struct {
+	int	nargs;
+	int	listsize;
+	char	**string;
+} string_list_t;
 
 /*
  * Backend functions
@@ -259,10 +260,14 @@ sunos_new_string_list(void)
 {
 	string_list_t *list;
 
-	list = calloc(1, sizeof(*list));
-	if (list != NULL)
-		list_create(list, sizeof(string_node_t),
-			    offsetof(string_node_t, link));
+	list = calloc(1, sizeof (string_list_t));
+	if (list == NULL)
+		return (NULL);
+	list->string = calloc(DEFAULT_LISTSIZE, sizeof (char *));
+	if (list->string == NULL)
+		return (NULL);
+	list->nargs = 0;
+	list->listsize = DEFAULT_LISTSIZE;
 
 	return (list);
 }
@@ -270,19 +275,22 @@ sunos_new_string_list(void)
 static int
 sunos_append_to_string_list(string_list_t *list, const char *arg)
 {
-	string_node_t *np;
+	char	*str = strdup(arg);
 
-	np = calloc(1, sizeof(*np));
-	if (!np)
+	if (str == NULL)
 		return (-1);
 
-	np->string = strdup(arg);
-	if (!np->string) {
-		free(np);
-		return (-1);
+	if ((list->nargs + 1) == list->listsize) { /* +1 is for NULL */
+		char	**tmp = realloc(list->string,
+		    sizeof (char *) * (list->listsize + 1));
+		if (tmp == NULL) {
+			free(str);
+			return (-1);
+		}
+		list->string = tmp;
+		list->string[list->listsize++] = NULL;
 	}
-
-	list_insert_tail(list, np);
+	list->string[list->nargs++] = str;
 
 	return (0);
 }
@@ -290,36 +298,20 @@ sunos_append_to_string_list(string_list_t *list, const char *arg)
 static void
 sunos_free_string_list(string_list_t *list)
 {
-	string_node_t *np;
+	int	i;
 
-	while ((np = list_remove_head(list)) != NULL) {
-		free(np->string);
-		free(np);
+	for (i = 0; i < list->nargs; i++) {
+		free(list->string[i]);
 	}
 
+	free(list->string);
 	free(list);
 }
 
 static char **
 sunos_build_argv_list(string_list_t *list)
 {
-	char **argv_list;
-	string_node_t *np;
-	int n;
-
-	n = 1; /* Start at 1 for NULL terminator */
-	for (np = list_head(list); np != NULL; np = list_next(list, np))
-		n++;
-
-	argv_list = calloc(n, sizeof(char *));
-	if (argv_list == NULL)
-		return NULL;
-
-	n = 0;
-	for (np = list_head(list); np != NULL; np = list_next(list, np))
-		argv_list[n++] = np->string;
-
-	return (argv_list);
+	return (list->string);
 }
 
 
@@ -363,8 +355,6 @@ sunos_exec_command(struct libusb_context *ctx, const char *path,
 		usbi_err(ctx, "fork failed: errno %d (%s)", errno, strerror(errno));
 		exit_status = -1;
 	}
-
-	free(argv_list);
 
 	return (exit_status);
 }
@@ -411,8 +401,9 @@ sunos_detach_kernel_driver(struct libusb_device_handle *dev_handle,
 	if (r)
 		usbi_warn(HANDLE_CTX(dev_handle), "one or more ioctls failed");
 
-	snprintf(path_arg, sizeof(path_arg), "^usb/%x.%x", dpriv->dev_descr.idVendor,
-	    dpriv->dev_descr.idProduct);
+	snprintf(path_arg, sizeof(path_arg), "^usb/%x.%x",
+	    libusb_le16_to_cpu(dpriv->dev_descr.idVendor),
+	    libusb_le16_to_cpu(dpriv->dev_descr.idProduct));
 	sunos_physpath_to_devlink(dpriv->phypath, path_arg, &dpriv->ugenpath);
 
 	if (access(dpriv->ugenpath, F_OK) == -1) {
@@ -476,7 +467,7 @@ static int
 sunos_fill_in_dev_info(di_node_t node, struct libusb_device *dev)
 {
 	int	proplen;
-	int	n, *addr, *port_prop;
+	int	*i, n, *addr, *port_prop;
 	char	*phypath;
 	uint8_t	*rdata;
 	struct libusb_device_descriptor	*descr;
@@ -526,7 +517,9 @@ sunos_fill_in_dev_info(di_node_t node, struct libusb_device *dev)
 	phypath = di_devfs_path(node);
 	if (phypath) {
 		dpriv->phypath = strdup(phypath);
-		snprintf(match_str, sizeof(match_str), "^usb/%x.%x", dpriv->dev_descr.idVendor, dpriv->dev_descr.idProduct);
+		snprintf(match_str, sizeof(match_str), "^usb/%x.%x",
+		    libusb_le16_to_cpu(dpriv->dev_descr.idVendor),
+		    libusb_le16_to_cpu(dpriv->dev_descr.idProduct));
 		usbi_dbg("match is %s", match_str);
 		sunos_physpath_to_devlink(dpriv->phypath, match_str,  &dpriv->ugenpath);
 		di_devfs_path_free(phypath);
@@ -546,18 +539,20 @@ sunos_fill_in_dev_info(di_node_t node, struct libusb_device *dev)
 	}
 
 	/* speed */
-	if (di_prop_exists(DDI_DEV_T_ANY, node, "low-speed") == 1) {
+	if (di_prop_lookup_ints(DDI_DEV_T_ANY, node, "low-speed", &i) >= 0) {
 		dev->speed = LIBUSB_SPEED_LOW;
-	} else if (di_prop_exists(DDI_DEV_T_ANY, node, "high-speed") == 1) {
+	} else if (di_prop_lookup_ints(DDI_DEV_T_ANY, node, "high-speed", &i) >= 0) {
 		dev->speed = LIBUSB_SPEED_HIGH;
-	} else if (di_prop_exists(DDI_DEV_T_ANY, node, "full-speed") == 1) {
+	} else if (di_prop_lookup_ints(DDI_DEV_T_ANY, node, "full-speed", &i) >= 0) {
 		dev->speed = LIBUSB_SPEED_FULL;
-	} else if (di_prop_exists(DDI_DEV_T_ANY, node, "super-speed") == 1) {
+	} else if (di_prop_lookup_ints(DDI_DEV_T_ANY, node, "super-speed", &i) >= 0) {
 		dev->speed = LIBUSB_SPEED_SUPER;
 	}
 
 	usbi_dbg("vid=%x pid=%x, path=%s, bus_nmber=0x%x, port_number=%d, "
-	    "speed=%d", dpriv->dev_descr.idVendor, dpriv->dev_descr.idProduct,
+	    "speed=%d",
+	    libusb_le16_to_cpu(dpriv->dev_descr.idVendor),
+	    libusb_le16_to_cpu(dpriv->dev_descr.idProduct),
 	    dpriv->phypath, dev->bus_number, dev->port_number, dev->speed);
 
 	return (LIBUSB_SUCCESS);
@@ -574,7 +569,7 @@ sunos_add_devices(di_devlink_t link, void *arg)
 	uint64_t		bdf = 0;
 	struct libusb_device	*dev;
 	sunos_dev_priv_t	*devpriv;
-	int			n;
+	int			n, *j;
 	int			i = 0;
 	int			*addr_prop;
 	uint8_t			bus_number = 0;
@@ -594,7 +589,7 @@ sunos_add_devices(di_devlink_t link, void *arg)
 
 	dn = myself;
 	/* find the root hub */
-	while (di_prop_exists(DDI_DEV_T_ANY, dn, "root-hub") != 1) {
+	while (di_prop_lookup_ints(DDI_DEV_T_ANY, dn, "root-hub", &j) != 0) {
 		usbi_dbg("find_root_hub:%s", di_devfs_path(dn));
 		n = di_prop_lookup_ints(DDI_DEV_T_ANY, dn,
 				"assigned-address", &addr_prop);
@@ -901,18 +896,50 @@ sunos_check_device_and_status_open(struct libusb_device_handle *hdl,
 	(void) snprintf(statfilename, PATH_MAX, "%sstat", filename);
 
 	/*
-	 * for interrupt IN endpoints, we need to enable one xfer
-	 * mode before opening the endpoint
+	 * In case configuration has been switched, the xfer endpoint needs
+	 * to be opened before the status endpoint, due to a ugen issue.
+	 * However, to enable the one transfer mode for an Interrupt-In pipe,
+	 * the status endpoint needs to be opened before the xfer endpoint.
+	 * So, open the xfer mode first and close it immediately
+	 * as a workaround. This will handle the configuration switch.
+	 * Then, open the status endpoint.  If for an Interrupt-in pipe,
+	 * write the USB_EP_INTR_ONE_XFER control to the status endpoint
+	 * to enable the one transfer mode.  Then, re-open the xfer mode.
+	 */
+	if (ep_type == LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
+		mode = O_RDWR;
+	} else if (ep_addr & LIBUSB_ENDPOINT_IN) {
+		mode = O_RDONLY;
+	} else {
+		mode = O_WRONLY;
+	}
+	/* Open the xfer endpoint first */
+	if ((fd = open(filename, mode)) == -1) {
+		usbi_dbg("can't open %s: %d(%s)", filename, errno,
+		    strerror(errno));
+
+		return (errno);
+	}
+	/* And immediately close the xfer endpoint */
+	(void) close(fd);
+
+	/*
+	 * Open the status endpoint.
+	 * If for an Interrupt-IN pipe, need to enable the one transfer mode
+	 * by writing USB_EP_INTR_ONE_XFER control to the status endpoint
+	 * before opening the xfer endpoint
 	 */
 	if ((ep_type == LIBUSB_TRANSFER_TYPE_INTERRUPT) &&
 	    (ep_addr & LIBUSB_ENDPOINT_IN)) {
 		char	control = USB_EP_INTR_ONE_XFER;
 		int	count;
 
-		/* open the status device node for the ep first RDWR */
+		/* Open the status endpoint with RDWR */
 		if ((fdstat = open(statfilename, O_RDWR)) == -1) {
 			usbi_dbg("can't open %s RDWR: %d",
 				statfilename, errno);
+
+			return (errno);
 		} else {
 			count = write(fdstat, &control, sizeof (control));
 			if (count != 1) {
@@ -923,37 +950,20 @@ sunos_check_device_and_status_open(struct libusb_device_handle *hdl,
 
 				return (errno);
 			}
-			/* close status node and open xfer node first */
-			close (fdstat);
+		}
+	} else {
+		if ((fdstat = open(statfilename, O_RDONLY)) == -1) {
+			usbi_dbg("can't open %s: %d", statfilename, errno);
+
+			return (errno);
 		}
 	}
 
-	/* open the xfer node first in case alt needs to be changed */
-	if (ep_type == LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
-		mode = O_RDWR;
-	} else if (ep_addr & LIBUSB_ENDPOINT_IN) {
-		mode = O_RDONLY;
-	} else {
-		mode = O_WRONLY;
-	}
-
-	/*
-	 * IMPORTANT: must open data xfer node first and then open stat node
-	 * Otherwise, it will fail on multi-config or multi-altsetting devices
-	 * with "Device Busy" error. See ugen_epxs_switch_cfg_alt() and
-	 * ugen_epxs_check_alt_switch() in ugen driver source code.
-	 */
+	/* Re-open the xfer endpoint */
 	if ((fd = open(filename, mode)) == -1) {
 		usbi_dbg("can't open %s: %d(%s)", filename, errno,
 		    strerror(errno));
-
-		return (errno);
-	}
-	/* open the status node */
-	if ((fdstat = open(statfilename, O_RDONLY)) == -1) {
-		usbi_dbg("can't open %s: %d", statfilename, errno);
-
-		(void) close(fd);
+		(void) close(fdstat);
 
 		return (errno);
 	}
@@ -1196,26 +1206,32 @@ sunos_async_callback(union sigval arg)
 	int ret;
 	sunos_dev_handle_priv_t *hpriv;
 	uint8_t ep;
+	libusb_device_handle *dev_handle;
 
-	hpriv = (sunos_dev_handle_priv_t *)xfer->dev_handle->os_priv;
-	ep = sunos_usb_ep_index(xfer->endpoint);
+	dev_handle = xfer->dev_handle;
 
-	ret = aio_error(aiocb);
-	if (ret != 0) {
-		xfer->status = sunos_usb_get_status(hpriv->eps[ep].statfd);
-	} else {
-		xfer->actual_length =
-		    LIBUSB_TRANSFER_TO_USBI_TRANSFER(xfer)->transferred =
-		    aio_return(aiocb);
+	/* libusb can forcibly interrupt transfer in do_close() */
+	if (dev_handle != NULL) {
+		hpriv = (sunos_dev_handle_priv_t *)dev_handle->os_priv;
+		ep = sunos_usb_ep_index(xfer->endpoint);
+
+		ret = aio_error(aiocb);
+		if (ret != 0) {
+			xfer->status = sunos_usb_get_status(hpriv->eps[ep].statfd);
+		} else {
+			xfer->actual_length =
+			    LIBUSB_TRANSFER_TO_USBI_TRANSFER(xfer)->transferred =
+			    aio_return(aiocb);
+		}
+
+		usb_dump_data(xfer->buffer, xfer->actual_length);
+
+		usbi_dbg("ret=%d, len=%d, actual_len=%d", ret, xfer->length,
+		    xfer->actual_length);
+
+		/* async notification */
+		usbi_signal_transfer_completion(LIBUSB_TRANSFER_TO_USBI_TRANSFER(xfer));
 	}
-
-	usb_dump_data(xfer->buffer, xfer->actual_length);
-
-	usbi_dbg("ret=%d, len=%d, actual_len=%d", ret, xfer->length,
-	    xfer->actual_length);
-
-	/* async notification */
-	usbi_signal_transfer_completion(LIBUSB_TRANSFER_TO_USBI_TRANSFER(xfer));
 }
 
 static int
@@ -1360,9 +1376,15 @@ solaris_submit_ctrl_on_default(struct libusb_transfer *transfer)
 	}
 	usbi_dbg("Done: ctrl data bytes %d", ret);
 
-	/* sync transfer handling */
+	/**
+	 * Sync transfer handling.
+ 	 * We should release transfer lock here and later get it back
+	 * as usbi_handle_transfer_completion() takes its own transfer lock.
+	 */
+	usbi_mutex_unlock(&LIBUSB_TRANSFER_TO_USBI_TRANSFER(transfer)->lock);
 	ret = usbi_handle_transfer_completion(LIBUSB_TRANSFER_TO_USBI_TRANSFER(transfer),
 	    transfer->status);
+	usbi_mutex_lock(&LIBUSB_TRANSFER_TO_USBI_TRANSFER(transfer)->lock);
 
 	return (ret);
 }
@@ -1503,8 +1525,6 @@ sunos_handle_transfer_completion(struct usbi_transfer *itransfer)
 int
 sunos_clock_gettime(int clkid, struct timespec *tp)
 {
-	usbi_dbg("clock %d", clkid);
-
 	if (clkid == USBI_CLOCK_REALTIME)
 		return clock_gettime(CLOCK_REALTIME, tp);
 
@@ -1637,6 +1657,13 @@ sunos_usb_get_status(int fd)
 	return (status);
 }
 
+#ifdef USBI_TIMERFD_AVAILABLE
+static clockid_t op_get_timerfd_clockid(void)
+{
+       return CLOCK_MONOTONIC;
+}
+#endif
+
 const struct usbi_os_backend usbi_backend = {
         .name = "Solaris",
         .caps = 0,
@@ -1669,6 +1696,9 @@ const struct usbi_os_backend usbi_backend = {
         .clear_transfer_priv = sunos_clear_transfer_priv,
         .handle_transfer_completion = sunos_handle_transfer_completion,
         .clock_gettime = sunos_clock_gettime,
+#ifdef USBI_TIMERFD_AVAILABLE
+        .get_timerfd_clockid = op_get_timerfd_clockid,
+#endif
         .device_priv_size = sizeof(sunos_dev_priv_t),
         .device_handle_priv_size = sizeof(sunos_dev_handle_priv_t),
         .transfer_priv_size = sizeof(sunos_xfer_priv_t),

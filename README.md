@@ -6,8 +6,8 @@
 [travisurl]:   https://travis-ci.org/karalabe/usb
 [appveyorimg]: https://ci.appveyor.com/api/projects/status/u96eq262bj2itprh/branch/master?svg=true
 [appveyorurl]: https://ci.appveyor.com/project/karalabe/usb
-[docimg]:      https://godoc.org/github.com/karalabe/usb?status.svg
-[docurl]:      https://godoc.org/github.com/karalabe/usb
+[docimg]:      https://godoc.org/github.com/vkuznecovas/usb?status.svg
+[docurl]:      https://godoc.org/github.com/vkuznecovas/usb
 
 # Yet another USB library for Go
 
@@ -44,4 +44,4 @@ Error handling for the `libusb` integration originates from the [`gousb`](https:
 
 This USB library is licensed under the [GNU Lesser General Public License v3.0](https://www.gnu.org/licenses/lgpl-3.0.en.html) (dictated by libusb).
 
-If you are only interested in Human Interface devices, a less restrictive package can be found at [`github.com/karalabe/hid`](https://github.com/karalabe/hid).
+If you are only interested in Human Interface devices, a less restrictive package can be found at [`github.com/karalabe/hid`](https://github.com/karalabe/hid)
